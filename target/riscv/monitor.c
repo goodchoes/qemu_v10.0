@@ -53,7 +53,7 @@ static void print_pte_header(Monitor *mon)
 }
 
 static void print_pte(Monitor *mon, int va_bits, target_ulong vaddr,
-                      hwaddr paddr, target_ulong size, int attr)
+                      hwaddr paddr, target_ulong size, int attr,target_ulong pte)
 {
     /* sanity check on vaddr */
     if (vaddr >= (1UL << va_bits)) {
@@ -65,7 +65,7 @@ static void print_pte(Monitor *mon, int va_bits, target_ulong vaddr,
     }
 
     monitor_printf(mon, TARGET_FMT_lx " " HWADDR_FMT_plx " " TARGET_FMT_lx
-                   " %c%c%c%c%c%c%c\n",
+                   " %c%c%c%c%c%c%c" " " TARGET_FMT_lx "\n",
                    addr_canonical(va_bits, vaddr),
                    paddr, size,
                    attr & PTE_R ? 'r' : '-',
@@ -74,7 +74,8 @@ static void print_pte(Monitor *mon, int va_bits, target_ulong vaddr,
                    attr & PTE_U ? 'u' : '-',
                    attr & PTE_G ? 'g' : '-',
                    attr & PTE_A ? 'a' : '-',
-                   attr & PTE_D ? 'd' : '-');
+                   attr & PTE_D ? 'd' : '-',
+                   pte);
 }
 
 static void walk_pte(Monitor *mon, hwaddr base, target_ulong start,
@@ -120,7 +121,7 @@ static void walk_pte(Monitor *mon, hwaddr base, target_ulong start,
                     (*last_paddr + *last_size != paddr) ||
                     (last_start + *last_size != start)) {
                     print_pte(mon, va_bits, *vbase, *pbase,
-                              *last_paddr + *last_size - *pbase, *last_attr);
+                              *last_paddr + *last_size - *pbase, *last_attr,pte);
 
                     *vbase = start;
                     *pbase = paddr;
@@ -204,7 +205,7 @@ static void mem_info_svxx(Monitor *mon, CPUArchState *env)
 
     /* don't forget the last one */
     print_pte(mon, va_bits, vbase, pbase,
-              last_paddr + last_size - pbase, last_attr);
+              last_paddr + last_size - pbase, last_attr,0);
 }
 
 void hmp_info_mem(Monitor *mon, const QDict *qdict)
