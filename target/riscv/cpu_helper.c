@@ -1380,7 +1380,9 @@ static int get_physical_address(CPURISCVState *env, hwaddr *physical,
                 qemu_log_mask(LOG_GUEST_ERROR, "%s: reserved bits set in PTE: "
                               "addr: 0x%" HWADDR_PRIx " pte: 0x" TARGET_FMT_lx "\n",
                               __func__, pte_addr, pte);
-                return TRANSLATE_FAIL;
+
+                pte &= ~PTE_RESERVED;
+                // return TRANSLATE_FAIL;
             }
 
             if (!pbmte && (pte & PTE_PBMT)) {
