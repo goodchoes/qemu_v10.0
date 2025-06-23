@@ -212,6 +212,7 @@ struct CPUClass {
  * also why we don't want to combine the two structs.
  */
 struct CPUTLBEntryFull {
+    int mem_encrypted;
     /*
      * @xlat_section contains:
      *  - in the lower TARGET_PAGE_BITS, a physical section number

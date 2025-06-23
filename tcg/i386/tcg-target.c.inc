@@ -2002,6 +2002,7 @@ typedef struct {
     int ofs;
     int seg;
     TCGAtomAlign aa;
+    TCGReg encrypted_reg;
 } HostAddress;
 
 bool tcg_target_has_memory_bswap(MemOp memop)
@@ -2171,6 +2172,7 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
         h->index = TCG_REG_L0;
         h->ofs = 0;
         h->seg = 0;
+        h->encrypted_reg = TCG_REG_L1;
     } else {
         *h = x86_guest_base;
     }
@@ -2238,6 +2240,10 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
         s->code_ptr += 4;
 
         /* TLB Hit.  */
+        // 在加载 addend 之前，先加载加密标志
+        tcg_out_ld(s, TCG_TYPE_I32, TCG_REG_L1, TCG_REG_L0, 
+            offsetof(CPUTLBEntry, mem_encrypted));
+        
         tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_L0, TCG_REG_L0,
                    offsetof(CPUTLBEntry, addend));
     } else if (a_mask) {
@@ -2258,6 +2264,12 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
     return ldst;
 }
 
+static void tgen_not(TCGContext *s, TCGType type, TCGReg a0, TCGReg a1)
+{
+    int rexw = type == TCG_TYPE_I32 ? 0 : P_REXW;
+    tcg_out_modrm(s, OPC_GRP3_Ev + rexw, EXT3_NOT, a0);
+}
+
 static void tcg_out_qemu_ld_direct(TCGContext *s, TCGReg datalo, TCGReg datahi,
                                    HostAddress h, TCGType type, MemOp memop)
 {
@@ -2271,6 +2283,7 @@ static void tcg_out_qemu_ld_direct(TCGContext *s, TCGReg datalo, TCGReg datahi,
         use_movbe = true;
         movop = OPC_MOVBE_GyMy;
     }
+
 
     switch (memop & MO_SSIZE) {
     case MO_UB:
@@ -2298,6 +2311,7 @@ static void tcg_out_qemu_ld_direct(TCGContext *s, TCGReg datalo, TCGReg datahi,
             tcg_out_modrm_sib_offset(s, OPC_MOVZWL + h.seg, datalo,
                                      h.base, h.index, 0, h.ofs);
         }
+
         break;
     case MO_SW:
         if (use_movbe) {
@@ -2312,6 +2326,23 @@ static void tcg_out_qemu_ld_direct(TCGContext *s, TCGReg datalo, TCGReg datahi,
     case MO_UL:
         tcg_out_modrm_sib_offset(s, movop + h.seg, datalo,
                                  h.base, h.index, 0, h.ofs);
+
+        // 仅在软 MMU 模式下且设置了加密标志寄存器时才处理
+        if (tcg_use_softmmu) {
+            TCGLabel *skip_decrypt = gen_new_label();
+            
+            // 测试加密标志
+            tcg_out_cmp(s, TCG_COND_EQ, h.encrypted_reg, 0, true, false);
+            
+            // 如果未加密则跳过解密
+            tcg_out_jxx(s, JCC_JE, skip_decrypt, 1);
+            
+            tgen_not(s, TCG_TYPE_I32, datalo, datalo);
+    
+            // 设置跳过解密的标签
+            tcg_out_label(s, skip_decrypt);
+
+        }
         break;
 #if TCG_TARGET_REG_BITS == 64
     case MO_SL:
@@ -2323,6 +2354,23 @@ static void tcg_out_qemu_ld_direct(TCGContext *s, TCGReg datalo, TCGReg datahi,
             tcg_out_modrm_sib_offset(s, OPC_MOVSLQ + h.seg, datalo,
                                      h.base, h.index, 0, h.ofs);
         }
+
+        // 仅在软 MMU 模式下且设置了加密标志寄存器时才处理
+        if (tcg_use_softmmu) {
+            TCGLabel *skip_decrypt = gen_new_label();
+            
+            // 测试加密标志
+            tcg_out_cmp(s, TCG_COND_EQ, h.encrypted_reg, 0, true, false);
+            
+            // 如果未加密则跳过解密
+            tcg_out_jxx(s, JCC_JE, skip_decrypt, 1);
+            
+            tgen_not(s, TCG_TYPE_I32, datalo, datalo);
+    
+            // 设置跳过解密的标签
+            tcg_out_label(s, skip_decrypt);
+        }
+
         break;
 #endif
     case MO_UQ:
@@ -2418,6 +2466,8 @@ static void tcg_out_qemu_ld_direct(TCGContext *s, TCGReg datalo, TCGReg datahi,
     default:
         g_assert_not_reached();
     }
+
+
 }
 
 static void tgen_qemu_ld(TCGContext *s, TCGType type, TCGReg data,
@@ -2492,6 +2542,21 @@ static void tcg_out_qemu_st_direct(TCGContext *s, TCGReg datalo, TCGReg datahi,
                                  h.base, h.index, 0, h.ofs);
         break;
     case MO_32:
+        // 仅在软 MMU 模式下且设置了加密标志寄存器时才处理
+        if (tcg_use_softmmu) {
+            TCGLabel *skip_decrypt = gen_new_label();
+            
+            // 测试加密标志
+            tcg_out_cmp(s, TCG_COND_EQ, h.encrypted_reg, 0, true, false);
+            
+            // 如果未加密则跳过解密
+            tcg_out_jxx(s, JCC_JE, skip_decrypt, 1);
+            
+            tgen_not(s, TCG_TYPE_I32, datalo, datalo);
+    
+            // 设置跳过加密的标签
+            tcg_out_label(s, skip_decrypt);
+        }
         tcg_out_modrm_sib_offset(s, movop + h.seg, datalo,
                                  h.base, h.index, 0, h.ofs);
         break;
@@ -3342,11 +3407,7 @@ static const TCGOutOpUnary outop_neg = {
     .out_rr = tgen_neg,
 };
 
-static void tgen_not(TCGContext *s, TCGType type, TCGReg a0, TCGReg a1)
-{
-    int rexw = type == TCG_TYPE_I32 ? 0 : P_REXW;
-    tcg_out_modrm(s, OPC_GRP3_Ev + rexw, EXT3_NOT, a0);
-}
+
 
 static const TCGOutOpUnary outop_not = {
     .base.static_constraint = C_O1_I1(r, 0),

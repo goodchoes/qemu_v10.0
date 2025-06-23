@@ -969,7 +969,7 @@ bool m68k_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         tlb_set_page(cs, address & TARGET_PAGE_MASK,
                      address & TARGET_PAGE_MASK,
                      PAGE_READ | PAGE_WRITE | PAGE_EXEC,
-                     mmu_idx, TARGET_PAGE_SIZE);
+                     mmu_idx, TARGET_PAGE_SIZE,false);
         return true;
     }
 
@@ -989,7 +989,7 @@ bool m68k_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                                address, access_type, &page_size);
     if (likely(ret == 0)) {
         tlb_set_page(cs, address & TARGET_PAGE_MASK,
-                     physical & TARGET_PAGE_MASK, prot, mmu_idx, page_size);
+                     physical & TARGET_PAGE_MASK, prot, mmu_idx, page_size,false);
         return true;
     }
 
@@ -1481,7 +1481,7 @@ void HELPER(ptest)(CPUM68KState *env, uint32_t addr, uint32_t is_read)
         tlb_set_page(env_cpu(env), addr & TARGET_PAGE_MASK,
                      physical & TARGET_PAGE_MASK,
                      prot, access_type & ACCESS_SUPER ?
-                     MMU_KERNEL_IDX : MMU_USER_IDX, page_size);
+                     MMU_KERNEL_IDX : MMU_USER_IDX, page_size,false);
     }
 }
 

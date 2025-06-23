@@ -51,6 +51,7 @@
 #endif
 #include "tcg/tcg-ldst.h"
 #include "backend-ldst.h"
+#include "qemu/mem_encrypt.h"
 
 
 /* DEBUG defines, enable DEBUG_TLB_LOG to log to the CPU_LOG_MMU target */
@@ -1011,6 +1012,7 @@ static inline void tlb_set_compare(CPUTLBEntryFull *full, CPUTLBEntry *ent,
         flags = 0;
     }
     ent->addr_idx[access_type] = address;
+    ent->mem_encrypted = (uintptr_t)full->mem_encrypted;
     full->slow_flags[access_type] = flags;
 }
 
@@ -1186,13 +1188,14 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
 
 void tlb_set_page_with_attrs(CPUState *cpu, vaddr addr,
                              hwaddr paddr, MemTxAttrs attrs, int prot,
-                             int mmu_idx, vaddr size)
+                             int mmu_idx, vaddr size,int mem_encrypted)
 {
     CPUTLBEntryFull full = {
         .phys_addr = paddr,
         .attrs = attrs,
         .prot = prot,
-        .lg_page_size = ctz64(size)
+        .lg_page_size = ctz64(size),
+        .mem_encrypted = mem_encrypted
     };
 
     assert(is_power_of_2(size));
@@ -1201,10 +1204,10 @@ void tlb_set_page_with_attrs(CPUState *cpu, vaddr addr,
 
 void tlb_set_page(CPUState *cpu, vaddr addr,
                   hwaddr paddr, int prot,
-                  int mmu_idx, vaddr size)
+                  int mmu_idx, vaddr size,int mem_encrypted)
 {
     tlb_set_page_with_attrs(cpu, addr, paddr, MEMTXATTRS_UNSPECIFIED,
-                            prot, mmu_idx, size);
+                            prot, mmu_idx, size,mem_encrypted);
 }
 
 /**
@@ -2258,10 +2261,22 @@ static Int128 do_ld16_beN(CPUState *cpu, MMULookupPageData *p,
 static uint8_t do_ld_1(CPUState *cpu, MMULookupPageData *p, int mmu_idx,
                        MMUAccessType type, uintptr_t ra)
 {
+    uint8_t ret = 0;
     if (unlikely(p->flags & TLB_MMIO)) {
         return do_ld_mmio_beN(cpu, p->full, 0, p->addr, 1, mmu_idx, type, ra);
     } else {
-        return *(uint8_t *)p->haddr;
+        if(true == p->full->mem_encrypted){
+            ret = *(uint8_t *)p->haddr;
+            qemu_log_mask(CPU_LOG_PAGE, "%s: p->haddr:%p value:0x%x ",
+                __func__, p->haddr, ret);
+            ret = do_mem_decrypt(ret);
+            qemu_log_mask(CPU_LOG_PAGE, "-> decrypted value:0x%x\n",ret);
+        }
+        else{
+            ret = *(uint8_t *)p->haddr;
+        }
+
+        return ret;
     }
 }
 
@@ -2276,11 +2291,25 @@ static uint16_t do_ld_2(CPUState *cpu, MMULookupPageData *p, int mmu_idx,
             ret = bswap16(ret);
         }
     } else {
-        /* Perform the load host endian, then swap if necessary. */
-        ret = load_atom_2(cpu, ra, p->haddr, memop);
-        if (memop & MO_BSWAP) {
-            ret = bswap16(ret);
+
+        if(true == p->full->mem_encrypted){
+            ret = load_atom_2(cpu, ra, p->haddr, memop);
+            qemu_log_mask(CPU_LOG_PAGE, "%s: p->haddr:%p value:0x%x",
+                __func__, p->haddr, ret);
+            ret = do_mem_decrypt(ret);
+            qemu_log_mask(CPU_LOG_PAGE, "-> decrypted value:0x%x\n",ret);
+            if (memop & MO_BSWAP) {
+                ret = bswap16(ret);
+            }
         }
+        else{
+            /* Perform the load host endian, then swap if necessary. */
+            ret = load_atom_2(cpu, ra, p->haddr, memop);
+            if (memop & MO_BSWAP) {
+                ret = bswap16(ret);
+            }
+        }
+
     }
     return ret;
 }
@@ -2297,10 +2326,23 @@ static uint32_t do_ld_4(CPUState *cpu, MMULookupPageData *p, int mmu_idx,
         }
     } else {
         /* Perform the load host endian. */
-        ret = load_atom_4(cpu, ra, p->haddr, memop);
-        if (memop & MO_BSWAP) {
-            ret = bswap32(ret);
+        if(true == p->full->mem_encrypted){
+            ret = load_atom_4(cpu, ra, p->haddr, memop);
+            qemu_log_mask(CPU_LOG_PAGE, "%s: p->haddr:%p value:0x%x",
+                __func__, p->haddr, ret);
+            ret = do_mem_decrypt(ret);
+            qemu_log_mask(CPU_LOG_PAGE, "-> decrypted value:0x%x\n",ret);
+            if (memop & MO_BSWAP) {
+                ret = bswap32(ret);
+            }
         }
+        else{
+            ret = load_atom_4(cpu, ra, p->haddr, memop);
+            if (memop & MO_BSWAP) {
+                ret = bswap32(ret);
+            }
+        }
+
     }
     return ret;
 }
@@ -2316,11 +2358,24 @@ static uint64_t do_ld_8(CPUState *cpu, MMULookupPageData *p, int mmu_idx,
             ret = bswap64(ret);
         }
     } else {
-        /* Perform the load host endian. */
-        ret = load_atom_8(cpu, ra, p->haddr, memop);
-        if (memop & MO_BSWAP) {
-            ret = bswap64(ret);
+        if(true == p->full->mem_encrypted){
+            ret = load_atom_8(cpu, ra, p->haddr, memop);
+            qemu_log_mask(CPU_LOG_PAGE, "%s: p->haddr:%p value:0x%lx ",
+                __func__, p->haddr, ret);
+            ret = do_mem_decrypt(ret);
+            qemu_log_mask(CPU_LOG_PAGE, "-> decrypted value:0x%lx\n",ret);
+            if (memop & MO_BSWAP) {
+                ret = bswap64(ret);
+            }
         }
+        else{
+            /* Perform the load host endian. */
+            ret = load_atom_8(cpu, ra, p->haddr, memop);
+            if (memop & MO_BSWAP) {
+                ret = bswap64(ret);
+            }
+        }
+
     }
     return ret;
 }
@@ -2697,7 +2752,6 @@ static void do_st_2(CPUState *cpu, MMULookupPageData *p, uint16_t val,
         store_atom_2(cpu, ra, p->haddr, memop, val);
     }
 }
-
 static void do_st_4(CPUState *cpu, MMULookupPageData *p, uint32_t val,
                     int mmu_idx, MemOp memop, uintptr_t ra)
 {
@@ -2712,6 +2766,12 @@ static void do_st_4(CPUState *cpu, MMULookupPageData *p, uint32_t val,
         /* Swap to host endian if necessary, then store. */
         if (memop & MO_BSWAP) {
             val = bswap32(val);
+        }
+        if(true ==  p->full->mem_encrypted){
+            qemu_log_mask(CPU_LOG_PAGE, "%s: p->haddr:%p value:0x%x ",
+                __func__, p->haddr, val);
+            val = do_mem_encrypt(val);
+            qemu_log_mask(CPU_LOG_PAGE, "-> encrypted value:0x%x\n",val);
         }
         store_atom_4(cpu, ra, p->haddr, memop, val);
     }
@@ -2778,13 +2838,13 @@ static void do_st4_mmu(CPUState *cpu, vaddr addr, uint32_t val,
     MMULookupLocals l;
     bool crosspage;
 
+
     cpu_req_mo(cpu, TCG_MO_LD_ST | TCG_MO_ST_ST);
     crosspage = mmu_lookup(cpu, addr, oi, ra, MMU_DATA_STORE, &l);
     if (likely(!crosspage)) {
         do_st_4(cpu, &l.page[0], val, l.mmu_idx, l.memop, ra);
         return;
     }
-
     /* Swap to little endian for simplicity, then store by bytes. */
     if ((l.memop & MO_BSWAP) != MO_LE) {
         val = bswap32(val);

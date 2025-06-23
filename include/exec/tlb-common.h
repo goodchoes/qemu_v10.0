@@ -19,7 +19,8 @@
 #ifndef EXEC_TLB_COMMON_H
 #define EXEC_TLB_COMMON_H 1
 
-#define CPU_TLB_ENTRY_BITS (HOST_LONG_BITS == 32 ? 4 : 5)
+// #define CPU_TLB_ENTRY_BITS (HOST_LONG_BITS == 32 ? 4 : 5)
+#define CPU_TLB_ENTRY_BITS (HOST_LONG_BITS == 32 ? 5 : 6)
 
 /* Minimalized TLB entry for use by TCG fast path. */
 typedef union CPUTLBEntry {
@@ -32,6 +33,7 @@ typedef union CPUTLBEntry {
          * use the corresponding iotlb value.
          */
         uintptr_t addend;
+        uintptr_t mem_encrypted;
     };
     /*
      * Padding to get a power of two size, as well as index

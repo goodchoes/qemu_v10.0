@@ -36,6 +36,7 @@
 #include "cpu_bits.h"
 #include "debug.h"
 #include "pmp.h"
+#include "qemu/mem_encrypt.h"
 
 int riscv_env_mmu_index(CPURISCVState *env, bool ifetch)
 {
@@ -1189,13 +1190,14 @@ static int get_physical_address(CPURISCVState *env, hwaddr *physical,
                                 target_ulong *fault_pte_addr,
                                 int access_type, int mmu_idx,
                                 bool first_stage, bool two_stage,
-                                bool is_debug, bool is_probe)
+                                bool is_debug, bool is_probe, int *mem_encrypted)
 {
     /*
      * NOTE: the env->pc value visible here will not be
      * correct, but the value visible to the exception handler
      * (riscv_cpu_do_interrupt) is correct
      */
+    int npt_mem_encrypted = MEM_ENCRYPT_DISABLE;
     MemTxResult res;
     MemTxAttrs attrs = MEMTXATTRS_UNSPECIFIED;
     int mode = mmuidx_priv(mmu_idx);
@@ -1341,7 +1343,7 @@ static int get_physical_address(CPURISCVState *env, hwaddr *physical,
             int vbase_ret = get_physical_address(env, &vbase, &vbase_prot,
                                                  base, NULL, MMU_DATA_LOAD,
                                                  MMUIdx_U, false, true,
-                                                 is_debug, false);
+                                                 is_debug, false,&npt_mem_encrypted);
 
             if (vbase_ret != TRANSLATE_SUCCESS) {
                 if (fault_pte_addr) {
@@ -1373,6 +1375,12 @@ static int get_physical_address(CPURISCVState *env, hwaddr *physical,
             return TRANSLATE_FAIL;
         }
 
+     if (0 != (pte & MEM_ENCRYPT_BIT_OFFSET)) {
+       qemu_log_mask(CPU_LOG_PAGE, "%s: MEM_ENCRYPT_BIT_OFFSET setted in pte: "
+            "pte_addr: 0x%" HWADDR_PRIx " pte: 0x" TARGET_FMT_lx "\n",
+            __func__, pte_addr, pte);
+       *mem_encrypted = MEM_ENCRYPT_ENABLE;
+     }
         if (riscv_cpu_sxl(env) == MXL_RV32) {
             ppn = pte >> PTE_PPN_SHIFT;
         } else {
@@ -1574,7 +1582,12 @@ static int get_physical_address(CPURISCVState *env, hwaddr *physical,
                 old_pte = qatomic_cmpxchg(pte_pa, cpu_to_le64(pte), cpu_to_le64(updated_pte));
                 old_pte = le64_to_cpu(old_pte);
             }
+            old_pte &= ~PTE_RESERVED;
             if (old_pte != pte) {
+         qemu_log_mask(CPU_LOG_PAGE,
+                       "%s: go restart: "
+                       "old_pte: 0x" TARGET_FMT_lx " pte: 0x" TARGET_FMT_lx "\n",
+                       __func__, old_pte, pte);
                 goto restart;
             }
             pte = updated_pte;
@@ -1602,6 +1615,12 @@ static int get_physical_address(CPURISCVState *env, hwaddr *physical,
                   (vpn & (((target_ulong)1 << ptshift) - 1))
                  ) << PGSHIFT) | (addr & ~TARGET_PAGE_MASK);
 
+
+    if (MEM_ENCRYPT_ENABLE == *mem_encrypted) {
+        qemu_log_mask(CPU_LOG_PAGE, "%s: MEM_ENCRYPT_BIT_OFFSET host addr: "
+            "pte_addr: 0x%" HWADDR_PRIx " pte: 0x" TARGET_FMT_lx "\n",
+            __func__, *physical, pte);
+    }
     /*
      * Remove write permission unless this is a store, or the page is
      * already dirty, so that we TLB miss on later writes to update
@@ -1663,21 +1682,21 @@ hwaddr riscv_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
     RISCVCPU *cpu = RISCV_CPU(cs);
     CPURISCVState *env = &cpu->env;
     hwaddr phys_addr;
+    int mem_encrypted = MEM_ENCRYPT_DISABLE;
     int prot;
     int mmu_idx = riscv_env_mmu_index(&cpu->env, false);
 
     if (get_physical_address(env, &phys_addr, &prot, addr, NULL, 0, mmu_idx,
-                             true, env->virt_enabled, true, false)) {
+                             true, env->virt_enabled, true, false,&mem_encrypted)) {
         return -1;
     }
 
     if (env->virt_enabled) {
         if (get_physical_address(env, &phys_addr, &prot, phys_addr, NULL,
-                                 0, MMUIdx_U, false, true, true, false)) {
+                                 0, MMUIdx_U, false, true, true, false,&mem_encrypted)) {
             return -1;
         }
     }
-
     return phys_addr & TARGET_PAGE_MASK;
 }
 
@@ -1778,6 +1797,7 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     hwaddr tlb_size = TARGET_PAGE_SIZE;
 
     env->guest_phys_fault_addr = 0;
+    int mem_encrypted = MEM_ENCRYPT_DISABLE;
 
     qemu_log_mask(CPU_LOG_MMU, "%s ad %" VADDR_PRIx " rw %d mmu_idx %d\n",
                   __func__, address, access_type, mmu_idx);
@@ -1787,7 +1807,7 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         /* Two stage lookup */
         ret = get_physical_address(env, &pa, &prot, address,
                                    &env->guest_phys_fault_addr, access_type,
-                                   mmu_idx, true, true, false, probe);
+                                   mmu_idx, true, true, false, probe,&mem_encrypted);
 
         /*
          * A G-stage exception may be triggered during two state lookup.
@@ -1810,8 +1830,7 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 
             ret = get_physical_address(env, &pa, &prot2, im_address, NULL,
                                        access_type, MMUIdx_U, false, true,
-                                       false, probe);
-
+                                       false, probe,&mem_encrypted);
             qemu_log_mask(CPU_LOG_MMU,
                           "%s 2nd-stage address=%" VADDR_PRIx
                           " ret %d physical "
@@ -1848,8 +1867,7 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         /* Single stage lookup */
         ret = get_physical_address(env, &pa, &prot, address, NULL,
                                    access_type, mmu_idx, true, false, false,
-                                   probe);
-
+                                   probe,&mem_encrypted);
         qemu_log_mask(CPU_LOG_MMU,
                       "%s address=%" VADDR_PRIx " ret %d physical "
                       HWADDR_FMT_plx " prot %d\n",
@@ -1875,7 +1893,7 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 
     if (ret == TRANSLATE_SUCCESS) {
         tlb_set_page(cs, address & ~(tlb_size - 1), pa & ~(tlb_size - 1),
-                     prot, mmu_idx, tlb_size);
+                     prot, mmu_idx, tlb_size,mem_encrypted);
         return true;
     } else if (probe) {
         return false;
